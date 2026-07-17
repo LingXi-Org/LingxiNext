@@ -1,0 +1,4 @@
+[submodule "vendor/LingxiGraph"]
+	path = vendor/LingxiGraph
+	url = https://github.com/LingXi-Org/LingxiGraph.git
+	branch = main

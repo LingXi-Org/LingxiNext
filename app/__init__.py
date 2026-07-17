@@ -1,0 +1,1 @@
+"""LingxiNext application package."""
