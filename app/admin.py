@@ -7,13 +7,19 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .bridge import graph_manager
 from .db import ping_database, session_scope
-from .graph_templates import GraphCompiler, validate_draft
+from .graph_templates import (
+    EDGE_RULES,
+    ROLE_RULES,
+    WORKFLOW_ROLES,
+    GraphCompiler,
+    validate_draft,
+)
 from .models import (
     AgentDefinition,
     AuditLog,
@@ -21,6 +27,7 @@ from .models import (
     Orchestration,
     OrchestrationRevision,
     PlatformUser,
+    ThreadBinding,
 )
 from .repository import (
     agent_payload,
@@ -36,6 +43,7 @@ from .schemas import (
     OrchestrationCreate,
     OrchestrationDraft,
     UserInput,
+    UserUpdate,
 )
 from .security import csrf_token, hash_password, require_admin, require_csrf, token_cipher
 
@@ -70,9 +78,11 @@ async def admin_page(request: Request):
         user = require_admin(request)
     except HTTPException:
         return HTMLResponse(
-            '<!doctype html><meta charset="utf-8"><title>LingxiNext</title>'
-            "<style>body{font:16px system-ui;display:grid;place-items:center;height:100vh;background:#0b1020;color:#fff}"
-            'a{color:#8be9fd}</style><p>请先在 <a href="/">LingxiNext</a> 登录管理员账户。</p>',
+            '<!doctype html><meta charset="utf-8"><title>LingxiNext 控制台</title>'
+            "<style>body{font:15px/1.6 system-ui;display:grid;place-items:center;height:100vh;"
+            "margin:0;background:#f6f7f9;color:#17181c}div{text-align:center}"
+            "a{color:#4f5ce5;font-weight:600}</style>"
+            '<div><p>访问控制台需要管理员身份。</p><p>请先在 <a href="/">LingxiNext</a> 登录管理员账户。</p></div>',
             status_code=401,
         )
     return templates.TemplateResponse(
@@ -97,6 +107,22 @@ async def bootstrap(request: Request, session: AsyncSession = Depends(session_sc
         "user": {"username": user.username, "role": user.role},
         "csrf": csrf_token(request),
         "counts": counts,
+    }
+
+
+@router.get("/api/admin/meta")
+async def orchestration_meta(_user=Depends(admin_guard)):
+    return {
+        "templates": {
+            template: {
+                "roles": {
+                    role: {"min": bounds[0], "max": bounds[1]} for role, bounds in rules.items()
+                },
+                "edges": sorted(EDGE_RULES[template]),
+                "workflow_roles": sorted(WORKFLOW_ROLES.get(template, set())),
+            }
+            for template, rules in ROLE_RULES.items()
+        }
     }
 
 
@@ -334,6 +360,29 @@ async def update_draft(
     return orchestration_payload(item)
 
 
+@router.delete("/api/admin/orchestrations/{orchestration_id}", status_code=204)
+async def delete_orchestration(
+    orchestration_id: uuid.UUID,
+    user=Depends(write_guard),
+    session: AsyncSession = Depends(session_scope),
+):
+    item = await session.get(Orchestration, orchestration_id)
+    if item is None:
+        raise HTTPException(404, detail="orchestration_not_found")
+    revision_ids = (
+        await session.scalars(
+            select(OrchestrationRevision.id).where(
+                OrchestrationRevision.orchestration_id == orchestration_id
+            )
+        )
+    ).all()
+    await session.delete(item)
+    await audit(session, user.username, "orchestration.delete", "orchestration", str(item.id))
+    await session.commit()
+    for revision_id in revision_ids:
+        await graph_manager.invalidate(str(revision_id))
+
+
 async def _validate_item(session: AsyncSession, item: Orchestration):
     draft = OrchestrationDraft.model_validate(item.draft)
     compiler = GraphCompiler()
@@ -427,6 +476,53 @@ async def revisions(
     }
 
 
+@router.get("/api/admin/orchestrations/{orchestration_id}/revisions/{revision_id}")
+async def revision_detail(
+    orchestration_id: uuid.UUID,
+    revision_id: uuid.UUID,
+    _user=Depends(admin_guard),
+    session: AsyncSession = Depends(session_scope),
+):
+    row = await session.get(OrchestrationRevision, revision_id)
+    if row is None or row.orchestration_id != orchestration_id:
+        raise HTTPException(404, detail="revision_not_found")
+    return {
+        "id": str(row.id),
+        "version": row.version,
+        "digest": row.digest,
+        "config": row.config,
+        "published_by": row.published_by,
+        "published_at": row.published_at,
+    }
+
+
+@router.post("/api/admin/orchestrations/{orchestration_id}/revisions/{revision_id}/restore")
+async def restore_revision(
+    orchestration_id: uuid.UUID,
+    revision_id: uuid.UUID,
+    user=Depends(write_guard),
+    session: AsyncSession = Depends(session_scope),
+):
+    item = await session.get(Orchestration, orchestration_id, with_for_update=True)
+    if item is None:
+        raise HTTPException(404, detail="orchestration_not_found")
+    revision = await session.get(OrchestrationRevision, revision_id)
+    if revision is None or revision.orchestration_id != orchestration_id:
+        raise HTTPException(404, detail="revision_not_found")
+    item.draft = revision.config
+    item.draft_version += 1
+    await audit(
+        session,
+        user.username,
+        "orchestration.draft.restore",
+        "orchestration",
+        str(item.id),
+        {"revision_id": str(revision.id), "version": revision.version},
+    )
+    await session.commit()
+    return orchestration_payload(item)
+
+
 @router.get("/api/admin/users")
 async def list_users(_user=Depends(admin_guard), session: AsyncSession = Depends(session_scope)):
     rows = (await session.scalars(select(PlatformUser).order_by(PlatformUser.username))).all()
@@ -468,19 +564,31 @@ async def create_user(
 @router.put("/api/admin/users/{user_id}")
 async def update_user(
     user_id: uuid.UUID,
-    body: UserInput,
+    body: UserUpdate,
     actor=Depends(write_guard),
     session: AsyncSession = Depends(session_scope),
 ):
     item = await session.get(PlatformUser, user_id)
     if item is None:
         raise HTTPException(404, detail="user_not_found")
+    if item.role == "admin" and (body.role != "admin" or not body.active):
+        admins = await session.scalar(
+            select(func.count())
+            .select_from(PlatformUser)
+            .where(PlatformUser.role == "admin", PlatformUser.active.is_(True))
+        )
+        if int(admins or 0) <= 1:
+            raise HTTPException(409, detail="cannot_demote_last_admin")
     item.username = body.username
-    item.password_hash = hash_password(body.password)
+    if body.password:
+        item.password_hash = hash_password(body.password)
     item.role = body.role
     item.active = body.active
     await audit(session, actor.username, "user.update", "user", body.username, {"role": body.role})
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        raise HTTPException(409, detail="username_exists") from exc
     return {"id": str(item.id), "username": item.username, "role": item.role, "active": item.active}
 
 
@@ -504,6 +612,115 @@ async def remove_user(
     await audit(session, actor.username, "user.delete", "user", item.username)
     await session.delete(item)
     await session.commit()
+
+
+@router.get("/api/admin/sessions")
+async def list_sessions(
+    limit: int = 50,
+    q: str = "",
+    orchestration_id: uuid.UUID | None = None,
+    _user=Depends(admin_guard),
+    session: AsyncSession = Depends(session_scope),
+):
+    limit = max(1, min(limit, 200))
+    sql = """
+        SELECT t.id, t."createdAt" AS created_at, t.name, t."userIdentifier" AS user_identifier,
+               b.orchestration_id::text AS orchestration_id, b.revision_id::text AS revision_id,
+               b.username,
+               (SELECT count(*) FROM steps s
+                 WHERE s."threadId" = t.id
+                   AND s.type IN ('user_message', 'assistant_message')) AS message_count
+        FROM threads t
+        LEFT JOIN thread_bindings b ON b.thread_id = t.id
+        WHERE (:q = '' OR t."userIdentifier" ILIKE :like OR t.name ILIKE :like)
+          AND (:oid IS NULL OR b.orchestration_id = CAST(:oid AS uuid))
+        ORDER BY t."createdAt" DESC NULLS LAST
+        LIMIT :limit
+    """
+    rows = (
+        await session.execute(
+            text(sql),
+            {
+                "q": q,
+                "like": f"%{q}%",
+                "oid": str(orchestration_id) if orchestration_id else None,
+                "limit": limit,
+            },
+        )
+    ).mappings()
+    items = [dict(row) for row in rows]
+
+    orchestration_ids = {item["orchestration_id"] for item in items if item["orchestration_id"]}
+    revision_ids = {item["revision_id"] for item in items if item["revision_id"]}
+    names: dict[str, str] = {}
+    versions: dict[str, int] = {}
+    if orchestration_ids:
+        for row in await session.execute(
+            select(Orchestration.id, Orchestration.name).where(
+                Orchestration.id.in_([uuid.UUID(x) for x in orchestration_ids])
+            )
+        ):
+            names[str(row.id)] = row.name
+    if revision_ids:
+        for rev_row in await session.execute(
+            select(OrchestrationRevision.id, OrchestrationRevision.version).where(
+                OrchestrationRevision.id.in_([uuid.UUID(x) for x in revision_ids])
+            )
+        ):
+            versions[str(rev_row.id)] = rev_row.version
+    for item in items:
+        item["orchestration_name"] = names.get(item["orchestration_id"])
+        item["revision_version"] = versions.get(item["revision_id"])
+    return {"items": items}
+
+
+@router.get("/api/admin/sessions/{thread_id}")
+async def session_detail(
+    thread_id: str,
+    user=Depends(admin_guard),
+    session: AsyncSession = Depends(session_scope),
+):
+    thread = (
+        await session.execute(
+            text(
+                'SELECT t.id, t."createdAt" AS created_at, t.name, '
+                't."userIdentifier" AS user_identifier FROM threads t WHERE t.id = :tid'
+            ),
+            {"tid": thread_id},
+        )
+    ).mappings().first()
+    if thread is None:
+        raise HTTPException(404, detail="session_not_found")
+    binding = await session.get(ThreadBinding, thread_id)
+    orchestration = None
+    version = None
+    if binding is not None:
+        item = await session.get(Orchestration, binding.orchestration_id)
+        orchestration = item.name if item else None
+        revision = await session.get(OrchestrationRevision, binding.revision_id)
+        version = revision.version if revision else None
+    steps = (
+        await session.execute(
+            text(
+                'SELECT s.id, s.name, s.type, s."parentId" AS parent_id, s."isError" AS is_error, '
+                's.input, s.output, s."createdAt" AS created_at, s.start, s."end" AS finish '
+                'FROM steps s WHERE s."threadId" = :tid ORDER BY s."createdAt" ASC NULLS LAST'
+            ),
+            {"tid": thread_id},
+        )
+    ).mappings()
+    await audit(session, user.username, "session.view", "session", thread_id)
+    await session.commit()
+    return {
+        "id": thread["id"],
+        "name": thread["name"],
+        "created_at": thread["created_at"],
+        "user_identifier": thread["user_identifier"],
+        "username": binding.username if binding else None,
+        "orchestration_name": orchestration,
+        "revision_version": version,
+        "steps": [dict(row) for row in steps],
+    }
 
 
 @router.get("/api/admin/audit")

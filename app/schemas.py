@@ -103,6 +103,13 @@ class UserInput(StrictModel):
     active: bool = True
 
 
+class UserUpdate(StrictModel):
+    username: str = Field(min_length=3, max_length=128, pattern=r"^[A-Za-z0-9_.@-]+$")
+    password: str | None = Field(default=None, min_length=12, max_length=256)
+    role: Literal["admin", "user"] = "user"
+    active: bool = True
+
+
 class ValidationIssue(BaseModel):
     path: str
     code: str

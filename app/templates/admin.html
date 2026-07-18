@@ -4,108 +4,62 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content="{{ csrf_token }}" />
-    <title>LingxiNext · 编排管理</title>
+    <meta name="current-user" content="{{ username }}" />
+    <title>LingxiNext 控制台</title>
     <link rel="stylesheet" href="/admin-static/admin.css" />
   </head>
   <body>
-    <div class="shell">
-      <aside class="sidebar">
-        <a class="brand" href="/">
-          <span class="brand-mark">LX</span>
-          <span><strong>LingxiNext</strong><small>Orchestration Studio</small></span>
+    <div class="app" id="app">
+      <aside class="sidebar" id="sidebar">
+        <a class="brand" href="#/dashboard">
+          <span class="brand-mark">灵</span>
+          <span class="brand-text"><strong>LingxiNext</strong><small>编排控制台</small></span>
         </a>
-        <nav aria-label="管理导航">
-          <button class="nav-item active" data-view="orchestrations"><span>01</span>编排画布</button>
-          <button class="nav-item" data-view="agents"><span>02</span>智能体</button>
-          <button class="nav-item" data-view="connections"><span>03</span>Coze 连接</button>
-          <button class="nav-item" data-view="users"><span>04</span>用户</button>
-          <button class="nav-item" data-view="audit"><span>05</span>审计</button>
+        <nav class="nav" aria-label="主导航">
+          <a class="nav-item" href="#/dashboard" data-route="dashboard">
+            <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3zm0 8h8v-6H3zm10 0h8V11h-8zm0-18v6h8V3z"/></svg>
+            总览
+          </a>
+          <a class="nav-item" href="#/orchestrations" data-route="orchestrations">
+            <svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 1 1 4 0 2 2 0 0 1-4 0Zm12 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0ZM4 19a2 2 0 1 1 4 0 2 2 0 0 1-4 0Zm12 0a2 2 0 1 1 4 0 2 2 0 0 1-4 0ZM7.5 6.2 16 10m-8.5 7.8L16 14M6 7v10m12-10v10" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+            智能体编排
+          </a>
+          <a class="nav-item" href="#/agents" data-route="agents">
+            <svg viewBox="0 0 24 24"><path d="M12 3a2 2 0 0 1 2 2v1h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3V5a2 2 0 0 1 2-2Zm-3.5 8a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z"/></svg>
+            智能体
+          </a>
+          <a class="nav-item" href="#/connections" data-route="connections">
+            <svg viewBox="0 0 24 24"><path d="M10.6 13.4a4 4 0 0 1 0-5.6l3-3a4 4 0 1 1 5.6 5.6l-1.6 1.6m-4.2-1.4a4 4 0 0 1 0 5.6l-3 3a4 4 0 0 1-5.6-5.6l1.6-1.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            Coze 连接
+          </a>
+          <a class="nav-item" href="#/sessions" data-route="sessions">
+            <svg viewBox="0 0 24 24"><path d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6l-4 4v-4H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm3 5h10M7 12h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            会话监控
+          </a>
+          <a class="nav-item" href="#/users" data-route="users">
+            <svg viewBox="0 0 24 24"><path d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 9a7 7 0 0 1 14 0zm14.5-9.2a3.5 3.5 0 0 0 0-6.6M22 20a6.5 6.5 0 0 0-4-5.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            用户
+          </a>
+          <a class="nav-item" href="#/audit" data-route="audit">
+            <svg viewBox="0 0 24 24"><path d="M12 8v4l3 2m6-2a9 9 0 1 1-9-9 9 9 0 0 1 9 9Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            审计日志
+          </a>
         </nav>
         <div class="sidebar-foot">
-          <span class="status-dot"></span>
-          <span>以 {{ username }} 登录</span>
+          <div class="me">
+            <span class="avatar" id="me-avatar"></span>
+            <span class="me-name" id="me-name">{{ username }}</span>
+          </div>
+          <a class="button subtle small block" href="/">返回聊天</a>
         </div>
       </aside>
-
-      <main>
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">SAFE GRAPH CONTROL PLANE</p>
-            <h1 id="view-title">编排画布</h1>
-          </div>
-          <div class="top-actions">
-            <span id="save-state" class="save-state">已同步</span>
-            <a class="button ghost" href="/">返回聊天</a>
-          </div>
-        </header>
-
-        <section id="view-orchestrations" class="view active">
-          <div class="studio-grid">
-            <section class="panel catalog-panel">
-              <div class="panel-head"><div><p class="kicker">PROFILES</p><h2>编排方案</h2></div><button id="new-orchestration" class="icon-button" title="新建编排">＋</button></div>
-              <div id="orchestration-list" class="stack-list"></div>
-            </section>
-
-            <section class="canvas-panel">
-              <div class="canvas-toolbar">
-                <div>
-                  <strong id="canvas-name">选择或新建编排方案</strong>
-                  <span id="canvas-meta">草稿尚未载入</span>
-                </div>
-                <div class="toolbar-actions">
-                  <button id="add-node" class="button ghost" disabled>添加节点</button>
-                  <button id="connect-mode" class="button ghost" disabled>连接节点</button>
-                  <button id="validate-draft" class="button ghost" disabled>校验</button>
-                  <button id="save-draft" class="button" disabled>保存草稿</button>
-                  <button id="publish-draft" class="button accent" disabled>发布版本</button>
-                </div>
-              </div>
-              <div class="canvas-wrap" id="canvas-wrap">
-                <svg id="graph-canvas" viewBox="0 0 1200 720" role="img" aria-label="多智能体编排节点画布">
-                  <defs>
-                    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker>
-                    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1"></circle></pattern>
-                  </defs>
-                  <rect width="100%" height="100%" fill="url(#grid)"></rect>
-                  <g id="edge-layer"></g><g id="node-layer"></g>
-                </svg>
-                <div id="canvas-empty" class="canvas-empty"><b>选择安全模板，搭建可发布的多智能体图</b><span>只有服务端允许的节点、角色和连接才能通过校验。</span></div>
-              </div>
-              <div id="validation-bar" class="validation-bar hidden"></div>
-            </section>
-
-            <aside class="panel inspector-panel">
-              <div class="panel-head"><div><p class="kicker">INSPECTOR</p><h2>节点配置</h2></div></div>
-              <div id="inspector-empty" class="empty-copy">选择画布中的节点以编辑角色、Agent 与路由参数。</div>
-              <form id="node-inspector" class="form hidden">
-                <label>节点 ID<input id="node-id" readonly /></label>
-                <label>模板角色<input id="node-role" readonly /></label>
-                <label>绑定智能体<select id="node-agent"></select></label>
-                <label class="topic-only">基础出价<input id="node-bid" type="number" min="0" max="1" step="0.05" /></label>
-                <label class="topic-only">关键词<textarea id="node-keywords" rows="4" placeholder="每行一个关键词"></textarea></label>
-                <button id="delete-node" type="button" class="button danger">删除节点</button>
-              </form>
-            </aside>
-          </div>
-        </section>
-
-        <section id="view-agents" class="view"><div class="resource-head"><div><p class="kicker">AGENT CATALOG</p><h2>智能体目录</h2><p>将 Coze Bot 或 Workflow 注册为受信节点。</p></div><button id="new-agent" class="button accent">新建智能体</button></div><div id="agent-grid" class="card-grid"></div></section>
-        <section id="view-connections" class="view"><div class="resource-head"><div><p class="kicker">SECRETS & ENDPOINTS</p><h2>Coze 连接</h2><p>Token 加密保存，永远不会通过接口回显。</p></div><button id="new-connection" class="button accent">新建连接</button></div><div id="connection-grid" class="card-grid"></div></section>
-        <section id="view-users" class="view"><div class="resource-head"><div><p class="kicker">ACCESS CONTROL</p><h2>平台用户</h2><p>管理员创建账户；系统不开放自助注册。</p></div><button id="new-user" class="button accent">新建用户</button></div><div class="panel table-panel"><table><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th></tr></thead><tbody id="user-table"></tbody></table></div></section>
-        <section id="view-audit" class="view"><div class="resource-head"><div><p class="kicker">IMMUTABLE TRAIL</p><h2>管理审计</h2><p>记录配置、发布、凭据和账户变更，不记录消息或密钥。</p></div><button id="refresh-audit" class="button ghost">刷新</button></div><div class="panel table-panel"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>资源</th></tr></thead><tbody id="audit-table"></tbody></table></div></section>
-      </main>
+      <main class="main" id="view" tabindex="-1"></main>
     </div>
 
-    <dialog id="resource-dialog">
-      <form method="dialog" class="dialog-card" id="resource-form">
-        <div class="dialog-head"><div><p class="kicker" id="dialog-kicker">CREATE</p><h2 id="dialog-title">新建</h2></div><button value="cancel" class="icon-button" aria-label="关闭">×</button></div>
-        <div id="dialog-fields" class="form"></div>
-        <p id="dialog-error" class="form-error hidden"></p>
-        <div class="dialog-actions"><button value="cancel" class="button ghost">取消</button><button id="dialog-submit" value="default" class="button accent">保存</button></div>
-      </form>
-    </dialog>
+    <div id="editor-root" class="editor-root" hidden></div>
+    <div id="modal-root"></div>
+    <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
-    <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/admin-static/admin.js"></script>
+    <script type="module" src="/admin-static/admin/main.js"></script>
   </body>
 </html>

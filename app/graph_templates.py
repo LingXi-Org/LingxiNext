@@ -83,6 +83,23 @@ ROLE_RULES: dict[str, dict[str, tuple[int, int]]] = {
     "plan_execute": {"planner": (1, 1), "executor": (1, 1), "replanner": (1, 1)},
 }
 
+EDGE_RULES: dict[str, set[tuple[str, str]]] = {
+    "topic_auction": set(),
+    "supervisor": {("supervisor", "specialist"), ("specialist", "supervisor")},
+    "handoff": {("agent", "agent")},
+    "parallel_review": {("source", "reviewer"), ("reviewer", "judge")},
+    "plan_execute": {
+        ("planner", "executor"),
+        ("executor", "replanner"),
+        ("replanner", "executor"),
+    },
+}
+
+WORKFLOW_ROLES: dict[str, set[str]] = {
+    "topic_auction": {"agent"},
+    "plan_execute": {"executor"},
+}
+
 
 def _diagram(draft: OrchestrationDraft) -> str:
     lines = ["flowchart LR"]
@@ -265,9 +282,7 @@ def validate_draft(draft: OrchestrationDraft, agents: dict[str, AgentSpec]) -> V
 
 
 def _workflow_allowed(template: str, role: str) -> bool:
-    return (template == "topic_auction" and role == "agent") or (
-        template == "plan_execute" and role == "executor"
-    )
+    return role in WORKFLOW_ROLES.get(template, set())
 
 
 def _validate_auction_config(index: int, config: dict[str, Any]) -> list[ValidationIssue]:
@@ -310,18 +325,7 @@ def _validate_auction_config(index: int, config: dict[str, Any]) -> list[Validat
 
 
 def _edge_allowed(template: str, source_role: str, target_role: str) -> bool:
-    allowed = {
-        "topic_auction": set(),
-        "supervisor": {("supervisor", "specialist"), ("specialist", "supervisor")},
-        "handoff": {("agent", "agent")},
-        "parallel_review": {("source", "reviewer"), ("reviewer", "judge")},
-        "plan_execute": {
-            ("planner", "executor"),
-            ("executor", "replanner"),
-            ("replanner", "executor"),
-        },
-    }
-    return (source_role, target_role) in allowed[template]
+    return (source_role, target_role) in EDGE_RULES[template]
 
 
 def _required_edges(draft: OrchestrationDraft) -> set[tuple[str, str]]:
