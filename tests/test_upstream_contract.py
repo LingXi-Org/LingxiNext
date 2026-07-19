@@ -5,7 +5,14 @@ import inspect
 import chainlit
 from chainlit.utils import mount_chainlit
 from lingxigraph import CancellationToken, Command, PostgresSaver, StateGraph
-from lingxigraph.integrations import AsyncCozeClient, CozeAgentNode, CozeWorkflowNode
+from lingxigraph.integrations import (
+    AsyncCozeClient,
+    CozeAgentNode,
+    CozeWorkflowNode,
+    file_object,
+    image_object,
+    text_object,
+)
 
 
 def test_chainlit_public_contract() -> None:
@@ -23,3 +30,8 @@ def test_lingxigraph_public_contract() -> None:
     assert inspect.isclass(AsyncCozeClient)
     assert inspect.isclass(CozeAgentNode)
     assert inspect.isclass(CozeWorkflowNode)
+    # Complete-feature surface: multimodal object_string helpers + file upload.
+    assert callable(file_object)
+    assert callable(image_object)
+    assert callable(text_object)
+    assert hasattr(AsyncCozeClient, "upload_file")

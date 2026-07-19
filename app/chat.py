@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+from uuid import uuid4
+
 import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from sqlalchemy import select
@@ -102,6 +106,22 @@ async def on_chat_resume(_thread) -> None:
             cl.user_session.set("orchestration_revision_id", str(binding.revision_id))
 
 
+async def _read_uploads(message: cl.Message) -> list[tuple[str, bytes, str]]:
+    """Collect binary content from a message's attached file/image elements."""
+    uploads: list[tuple[str, bytes, str]] = []
+    for element in message.elements or ():
+        content: bytes | None = getattr(element, "content", None)
+        if content is None:
+            path = getattr(element, "path", None)
+            if not path:
+                continue
+            content = await asyncio.to_thread(Path(path).read_bytes)
+        name = getattr(element, "name", None) or "upload"
+        mime = getattr(element, "mime", None) or "application/octet-stream"
+        uploads.append((str(name), bytes(content), str(mime)))
+    return uploads
+
+
 @cl.on_message
 async def on_message(message: cl.Message) -> None:
     thread_id, _username, _profile = _session_values()
@@ -110,7 +130,32 @@ async def on_message(message: cl.Message) -> None:
         if binding is None:
             await cl.Message(content="会话尚未绑定编排版本，请新建会话后重试。").send()
             return
-        await bridge.handle(session, binding, message.content, message.id)
+        objects: tuple[dict, ...] = ()
+        uploads = await _read_uploads(message)
+        if uploads:
+            try:
+                objects = await bridge.upload_files(session, binding, uploads)
+            except (LookupError, RuntimeError) as error:
+                await cl.Message(content=f"文件上传失败：{error}").send()
+                return
+        await bridge.handle(session, binding, message.content, message.id, objects)
+
+
+@cl.action_callback("coze_follow_up")
+async def on_follow_up(action: cl.Action) -> None:
+    """Treat a clicked follow-up suggestion as a new user turn."""
+    question = str((action.payload or {}).get("question", "")).strip()
+    await action.remove()
+    if not question:
+        return
+    thread_id, _username, _profile = _session_values()
+    async with SessionFactory() as session:
+        binding = await get_binding(session, thread_id)
+        if binding is None:
+            await cl.Message(content="会话尚未绑定编排版本，请新建会话后重试。").send()
+            return
+        await cl.Message(content=question, author="user").send()
+        await bridge.handle(session, binding, question, str(uuid4()))
 
 
 @cl.on_stop

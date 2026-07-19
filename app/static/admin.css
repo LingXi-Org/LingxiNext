@@ -608,12 +608,35 @@ tr:hover .row-actions, .res-card:hover .row-actions { opacity: 1; }
 }
 .chat-meta { font-size: 11px; color: var(--text-3); padding: 0 4px; }
 
+.trace-wrap { align-self: stretch; margin: 0 6%; display: flex; flex-direction: column; }
 .trace-item {
-  display: flex; align-items: center; gap: 9px;
-  align-self: stretch; margin: 0 6%;
+  display: flex; align-items: center; gap: 9px; width: 100%;
   background: var(--surface-2); border: 1px dashed var(--border-strong);
   border-radius: 9px; padding: 6px 12px; font-size: 12px;
+  cursor: pointer; text-align: left; transition: border-color .12s, background .12s;
 }
+.trace-item:hover { border-color: var(--accent-border); background: var(--accent-soft); }
+.trace-chev { width: 14px; height: 14px; flex: none; color: var(--text-3); transition: transform .15s; }
+.trace-item.open .trace-chev { transform: rotate(180deg); }
+.trace-item.open { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-style: solid; }
+.trace-detail[hidden] { display: none; }
+.trace-detail {
+  border: 1px dashed var(--border-strong); border-top: none;
+  border-radius: 0 0 9px 9px; background: var(--surface);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 10px;
+}
+.td-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
+.td-grid > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.td-grid span { font-size: 10.5px; color: var(--text-3); font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+.td-grid b { font-size: 12px; font-weight: 550; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.td-io span { display: block; font-size: 10.5px; color: var(--text-3); font-weight: 650; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
+.td-io pre {
+  margin: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 7px; padding: 8px 10px; max-height: 180px; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2);
+}
+.td-io.error pre { background: var(--danger-soft); border-color: #f0b6b0; color: #a02318; }
 .trace-item.error { background: var(--danger-soft); border-color: #f0b6b0; }
 .trace-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: #b9bccf; }
 .trace-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
@@ -621,6 +644,26 @@ tr:hover .row-actions, .res-card:hover .row-actions { opacity: 1; }
 .trace-dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 .trace-name { flex: 1; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trace-time { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+
+/* ---------- 系统监控 ---------- */
+.meter {
+  height: 6px; border-radius: 999px; background: #e7e8f2;
+  overflow: hidden; margin: 8px 0 6px;
+}
+.meter i {
+  display: block; height: 100%; border-radius: 999px;
+  background: var(--accent-grad);
+  transition: width .5s cubic-bezier(.3, .8, .3, 1);
+}
+.meter.warn i { background: linear-gradient(135deg, #f0a13c, #d97a06); }
+.meter.danger i { background: linear-gradient(135deg, #ef4438, #c8231a); }
+.sys-kv {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.sys-kv:last-child { border-bottom: none; }
+.sys-kv span { color: var(--text-3); flex: none; }
+.sys-kv b { font-weight: 570; color: var(--text-2); text-align: right; overflow-wrap: anywhere; }
 
 .kbd {
   font-family: var(--mono); font-size: 11px; background: var(--surface-2);
@@ -637,7 +680,8 @@ tr:hover .row-actions, .res-card:hover .row-actions { opacity: 1; }
 
 @media (max-width: 900px) {
   .app { grid-template-columns: 66px 1fr; }
-  .brand-text, .nav-item { font-size: 0; }
+  .brand-text { display: none; }
+  .nav-item { font-size: 0; }
   .nav-item { justify-content: center; padding: 11px; }
   .nav-item svg { width: 19px; height: 19px; }
   .me-name, .sidebar-foot .button { display: none; }

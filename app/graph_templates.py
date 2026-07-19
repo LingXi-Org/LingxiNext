@@ -33,9 +33,14 @@ def merge_dict(left: Any, right: Any) -> dict[str, Any]:
     return {**dict(left or {}), **dict(right or {})}
 
 
+def _last_write_wins(left: Any, right: Any) -> Any:
+    return right if right else left
+
+
 class GraphState(TypedDict, total=False):
     messages: Annotated[list[Any], add_messages]
     coze_conversations: Annotated[dict[str, str], merge_dict]
+    coze_suggestions: Annotated[tuple[str, ...], _last_write_wins]
     active_agent: str
     turn: int
     topic: str
@@ -506,6 +511,7 @@ class GraphCompiler:
                 client,
                 user_id=str((runtime.context or {}).get("username", "anonymous")),
                 stream=stream,
+                suggestions_key="coze_suggestions",
             )
             return await node(state, runtime)
 

@@ -623,11 +623,22 @@ export async function renderSessions(root) {
   await load();
 }
 
+function fmtMs(ms) {
+  if (ms == null || Number.isNaN(ms) || ms < 0) return '';
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
 function stepDuration(step) {
   if (!step.start || !step.finish) return '';
-  const ms = new Date(step.finish) - new Date(step.start);
-  if (Number.isNaN(ms) || ms < 0) return '';
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+  return fmtMs(new Date(step.finish) - new Date(step.start));
+}
+
+/** 节点级首字时间：节点开始到产出第一个可见 token 的间隔。 */
+function stepTtft(step) {
+  const first = step.metadata?.first_token_at;
+  const start = step.start || step.metadata?.started_at;
+  if (!first || !start) return '';
+  return fmtMs(new Date(first) - new Date(start));
 }
 
 async function openSessionDrawer(threadId) {
@@ -660,15 +671,41 @@ async function openSessionDrawer(threadId) {
         <span class="chat-meta">${esc(detail.username || detail.user_identifier || '用户')} · ${esc(formatDate(step.created_at))}</span></div>`;
     }
     if (step.type === 'assistant_message') {
+      const perf = [];
+      if (step.metadata?.ttft_ms != null) perf.push(`首字 ${fmtMs(step.metadata.ttft_ms)}`);
+      if (step.metadata?.total_ms != null) perf.push(`总耗时 ${fmtMs(step.metadata.total_ms)}`);
       return `<div class="chat-row ai"><div class="bubble ai">${esc(step.output || '')}</div>
-        <span class="chat-meta">助手 · ${esc(formatDate(step.created_at))}</span></div>`;
+        <span class="chat-meta">助手 · ${esc(formatDate(step.created_at))}${perf.length ? ' · ' + esc(perf.join(' · ')) : ''}</span></div>`;
     }
     const status = STEP_STATUS[step.output] ?? { label: step.output || '执行', cls: '' };
-    return `<div class="trace-item ${step.is_error ? 'error' : ''}">
-      <span class="trace-dot ${status.cls}"></span>
-      <span class="trace-name mono">${esc(step.name || step.type)}</span>
-      <span class="badge ${status.cls}" style="height:19px">${esc(status.label)}</span>
-      <span class="trace-time">${esc(stepDuration(step))}</span>
+    const meta = step.metadata ?? {};
+    const ttft = stepTtft(step);
+    const rows = [
+      ['类型', step.type || 'run'],
+      ['开始', step.start ? formatDate(step.start) : '—'],
+      ['结束', step.finish ? formatDate(step.finish) : '—'],
+      ['总耗时', stepDuration(step) || '—'],
+      ['首字时间', ttft || '—'],
+      meta.task_id ? ['Task ID', meta.task_id] : null,
+      meta.attempt != null ? ['重试次数', String(meta.attempt)] : null,
+    ].filter(Boolean);
+    const io = [
+      step.input && step.input !== 'running' ? ['输入', step.input, ''] : null,
+      step.output ? ['输出', step.output, ''] : null,
+      meta.error ? ['错误详情', meta.error, 'error'] : null,
+    ].filter(Boolean);
+    return `<div class="trace-wrap">
+      <button type="button" class="trace-item ${step.is_error ? 'error' : ''}" data-trace>
+        <span class="trace-dot ${status.cls}"></span>
+        <span class="trace-name mono">${esc(step.name || step.type)}</span>
+        <span class="badge ${status.cls}" style="height:19px">${esc(status.label)}</span>
+        <span class="trace-time">${esc(ttft ? `首字 ${ttft} · 总 ${stepDuration(step)}` : stepDuration(step))}</span>
+        <svg class="trace-chev" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <div class="trace-detail" hidden>
+        <div class="td-grid">${rows.map(([k, v]) => `<div><span>${esc(k)}</span><b class="mono">${esc(v)}</b></div>`).join('')}</div>
+        ${io.map(([k, v, cls]) => `<div class="td-io ${cls}"><span>${esc(k)}</span><pre>${esc(v)}</pre></div>`).join('')}
+      </div>
     </div>`;
   }).join('');
 
@@ -679,8 +716,122 @@ async function openSessionDrawer(threadId) {
       <div><span class="lbl">编排</span><b>${detail.orchestration_name ? `${esc(detail.orchestration_name)} · v${detail.revision_version ?? '?'}` : '未绑定'}</b></div>
       <div><span class="lbl">开始</span><b>${esc(formatDate(detail.created_at))}</b></div>
     </div>
-    <h4 class="sess-h4">对话与执行过程</h4>
+    <h4 class="sess-h4">对话与执行过程 <span class="hint" style="text-transform:none;letter-spacing:0;font-weight:400">（点击执行节点可展开调试详情）</span></h4>
     <div class="chat-log">${timeline || '<p class="insp-empty">该会话暂无消息记录。</p>'}</div>`;
+
+  body.querySelectorAll('[data-trace]').forEach((button) =>
+    button.addEventListener('click', () => {
+      const detail = button.nextElementSibling;
+      detail.hidden = !detail.hidden;
+      button.classList.toggle('open', !detail.hidden);
+    }));
+}
+
+/* ---------- 系统监控 ---------- */
+
+function fmtBytes(bytes) {
+  if (bytes == null) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Number(bytes);
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index += 1; }
+  return `${value >= 100 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
+}
+
+function fmtUptime(seconds) {
+  if (seconds == null) return '—';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d} 天 ${h} 小时`;
+  if (h > 0) return `${h} 小时 ${m} 分钟`;
+  return `${m} 分钟`;
+}
+
+function meter(percent) {
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  const cls = value >= 90 ? 'danger' : value >= 75 ? 'warn' : '';
+  return `<div class="meter ${cls}"><i style="width:${value}%"></i></div>`;
+}
+
+const kvRow = (label, value) => `<div class="sys-kv"><span>${esc(label)}</span><b>${value}</b></div>`;
+
+export async function renderSystem(root) {
+  root.innerHTML = `<div class="page">
+    ${pageHead('系统监控', '单机部署的应用、主机与数据库运行状态（每 5 秒自动刷新）', '<button class="button subtle" data-refresh>立即刷新</button>')}
+    <div data-body><div class="skeleton" style="height:280px"></div></div>
+  </div>`;
+  const bodyEl = root.querySelector('[data-body]');
+
+  const draw = (s) => {
+    const db = s.database ?? {};
+    const pool = db.pool ?? {};
+    const counts = db.counts ?? {};
+    bodyEl.innerHTML = `
+      <div class="stat-grid">
+        <div class="panel stat-card">
+          <span class="lbl">CPU 使用率</span>
+          <span class="num">${(s.system.cpu_percent ?? 0).toFixed(0)}<small style="font-size:15px">%</small></span>
+          ${meter(s.system.cpu_percent)}
+          <span class="extra">${s.system.cpu_count} 核 · 进程占用 ${(s.process.cpu_percent ?? 0).toFixed(0)}%${s.system.load_1m != null ? ` · 负载 ${s.system.load_1m.toFixed(2)}` : ''}</span>
+        </div>
+        <div class="panel stat-card">
+          <span class="lbl">内存</span>
+          <span class="num">${(s.system.mem_percent ?? 0).toFixed(0)}<small style="font-size:15px">%</small></span>
+          ${meter(s.system.mem_percent)}
+          <span class="extra">${fmtBytes(s.system.mem_used)} / ${fmtBytes(s.system.mem_total)} · 进程 ${fmtBytes(s.process.rss_bytes)}</span>
+        </div>
+        <div class="panel stat-card">
+          <span class="lbl">磁盘</span>
+          <span class="num">${(s.system.disk_percent ?? 0).toFixed(0)}<small style="font-size:15px">%</small></span>
+          ${meter(s.system.disk_percent)}
+          <span class="extra">${fmtBytes(s.system.disk_used)} / ${fmtBytes(s.system.disk_total)}</span>
+        </div>
+        <div class="panel stat-card">
+          <span class="lbl">数据库</span>
+          <span class="num" style="font-size:20px;padding:3px 0">${db.ok ? '<span class="badge ok" style="height:26px;font-size:13px"><span class="dot"></span>正常</span>' : '<span class="badge danger" style="height:26px;font-size:13px"><span class="dot"></span>异常</span>'}</span>
+          <span class="extra">${db.ok ? `查询延迟 ${db.latency_ms ?? '—'} ms · 数据量 ${fmtBytes(db.size_bytes)}` : '无法连接 PostgreSQL，请检查服务'}</span>
+        </div>
+      </div>
+      <div class="dash-cols">
+        <div class="panel">
+          <div class="dash-panel-head"><h3>应用运行时</h3><span class="badge accent">单机部署</span></div>
+          <div style="padding:8px 20px 14px">
+            ${kvRow('持续运行', esc(fmtUptime(s.app.uptime_seconds)))}
+            ${kvRow('启动时间', esc(formatDate(s.app.started_at)))}
+            ${kvRow('应用版本', `<span class="mono">LingxiNext ${esc(s.app.version)}</span>`)}
+            ${kvRow('运行环境', `<span class="mono">Python ${esc(s.app.python)} · ${esc(s.app.platform)}</span>`)}
+            ${kvRow('进程线程数', esc(String(s.process.threads)))}
+            ${kvRow('已编译图缓存', `${s.app.compiled_graphs} 个已发布版本在内存中就绪`)}
+          </div>
+        </div>
+        <div class="panel">
+          <div class="dash-panel-head"><h3>数据库与存储</h3></div>
+          <div style="padding:8px 20px 14px">
+            ${kvRow('连接池', pool.size != null ? `使用 ${pool.checked_out} / ${pool.size}（溢出 ${pool.overflow ?? 0}）` : '—')}
+            ${kvRow('会话线程', `${counts.threads ?? '—'} 个（绑定 ${counts.thread_bindings ?? '—'}）`)}
+            ${kvRow('消息与步骤', `${counts.steps ?? '—'} 条记录`)}
+            ${kvRow('审计日志', `${counts.audit_logs ?? '—'} 条`)}
+            ${kvRow('数据库体积', esc(fmtBytes(db.size_bytes)))}
+          </div>
+        </div>
+      </div>`;
+  };
+
+  const load = async () => {
+    try {
+      draw(await api('/api/admin/system'));
+    } catch (error) {
+      bodyEl.innerHTML = emptyState({ title: '监控数据加载失败', hint: errorText(error) });
+    }
+  };
+
+  const timer = setInterval(() => {
+    if (!root.isConnected) { clearInterval(timer); return; }
+    load();
+  }, 5000);
+  root.querySelector('[data-refresh]').addEventListener('click', load);
+  await load();
 }
 
 /* ---------- 审计日志 ---------- */

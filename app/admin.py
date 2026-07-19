@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import json
+import platform
+import shutil
+import sys
+import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import psutil
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -12,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .bridge import graph_manager
-from .db import ping_database, session_scope
+from .db import engine, ping_database, session_scope
 from .graph_templates import (
     EDGE_RULES,
     ROLE_RULES,
@@ -107,6 +114,88 @@ async def bootstrap(request: Request, session: AsyncSession = Depends(session_sc
         "user": {"username": user.username, "role": user.role},
         "csrf": csrf_token(request),
         "counts": counts,
+    }
+
+
+_PROCESS = psutil.Process()
+_STARTED_AT = datetime.now(timezone.utc)
+
+
+@router.get("/api/admin/system")
+async def system_status(
+    _user=Depends(admin_guard), session: AsyncSession = Depends(session_scope)
+):
+    with _PROCESS.oneshot():
+        memory = _PROCESS.memory_info()
+        process_cpu = _PROCESS.cpu_percent(interval=None)
+        process_threads = _PROCESS.num_threads()
+    virtual = psutil.virtual_memory()
+    disk = shutil.disk_usage(Path.cwd())
+    try:
+        load_1, load_5, load_15 = psutil.getloadavg()
+    except (AttributeError, OSError):
+        load_1 = load_5 = load_15 = None
+
+    database: dict[str, object] = {"ok": True, "latency_ms": None}
+    counts: dict[str, int] = {}
+    started = time.perf_counter()
+    try:
+        await session.execute(text("SELECT 1"))
+        database["latency_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        database["size_bytes"] = await session.scalar(
+            text("SELECT pg_database_size(current_database())")
+        )
+        for key, sql in (
+            ("threads", "SELECT count(*) FROM threads"),
+            ("steps", "SELECT count(*) FROM steps"),
+            ("thread_bindings", "SELECT count(*) FROM thread_bindings"),
+            ("audit_logs", "SELECT count(*) FROM audit_logs"),
+        ):
+            counts[key] = int(await session.scalar(text(sql)) or 0)
+    except Exception:  # noqa: BLE001 - 监控端点必须在数据库故障时也能响应
+        database["ok"] = False
+
+    pool_stats: dict[str, int] | None = None
+    pool = getattr(engine, "pool", None)
+    if pool is not None:
+        try:
+            pool_stats = {
+                "size": pool.size(),
+                "checked_out": pool.checkedout(),
+                "checked_in": pool.checkedin(),
+                "overflow": pool.overflow(),
+            }
+        except Exception:  # noqa: BLE001
+            pool_stats = None
+
+    return {
+        "app": {
+            "version": "0.1.0",
+            "python": sys.version.split()[0],
+            "platform": f"{platform.system()} {platform.release()}",
+            "started_at": _STARTED_AT,
+            "uptime_seconds": int((datetime.now(timezone.utc) - _STARTED_AT).total_seconds()),
+            "compiled_graphs": graph_manager.cache_size(),
+        },
+        "process": {
+            "rss_bytes": memory.rss,
+            "cpu_percent": process_cpu,
+            "threads": process_threads,
+        },
+        "system": {
+            "cpu_percent": psutil.cpu_percent(interval=None),
+            "cpu_count": psutil.cpu_count() or 0,
+            "load_1m": load_1,
+            "load_5m": load_5,
+            "load_15m": load_15,
+            "mem_total": virtual.total,
+            "mem_used": virtual.used,
+            "mem_percent": virtual.percent,
+            "disk_total": disk.total,
+            "disk_used": disk.used,
+            "disk_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0,
+        },
+        "database": {**database, "pool": pool_stats, "counts": counts},
     }
 
 
@@ -699,16 +788,27 @@ async def session_detail(
         orchestration = item.name if item else None
         revision = await session.get(OrchestrationRevision, binding.revision_id)
         version = revision.version if revision else None
-    steps = (
+    step_rows = (
         await session.execute(
             text(
                 'SELECT s.id, s.name, s.type, s."parentId" AS parent_id, s."isError" AS is_error, '
-                's.input, s.output, s."createdAt" AS created_at, s.start, s."end" AS finish '
+                's.input, s.output, s.metadata, s."createdAt" AS created_at, s.start, '
+                's."end" AS finish '
                 'FROM steps s WHERE s."threadId" = :tid ORDER BY s."createdAt" ASC NULLS LAST'
             ),
             {"tid": thread_id},
         )
     ).mappings()
+    steps = []
+    for row in step_rows:
+        step_item: dict[str, object] = dict(row)
+        raw_meta = step_item.get("metadata")
+        if isinstance(raw_meta, str) and raw_meta:
+            try:
+                step_item["metadata"] = json.loads(raw_meta)
+            except ValueError:
+                step_item["metadata"] = {"raw": raw_meta[:2000]}
+        steps.append(step_item)
     await audit(session, user.username, "session.view", "session", thread_id)
     await session.commit()
     return {
@@ -719,7 +819,7 @@ async def session_detail(
         "username": binding.username if binding else None,
         "orchestration_name": orchestration,
         "revision_version": version,
-        "steps": [dict(row) for row in steps],
+        "steps": steps,
     }
 
 

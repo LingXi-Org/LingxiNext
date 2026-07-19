@@ -15,6 +15,7 @@ const ROUTES = {
   agents: views.renderAgents,
   connections: views.renderConnections,
   sessions: views.renderSessions,
+  system: views.renderSystem,
   users: views.renderUsers,
   audit: views.renderAudit,
 };
