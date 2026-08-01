@@ -26,6 +26,11 @@ const enabledBadge = (enabled) =>
     ? '<span class="badge ok"><span class="dot"></span>启用</span>'
     : '<span class="badge"><span class="dot"></span>停用</span>';
 
+const ROLE_LABELS = { admin: '管理员', teacher: '教师', student: '学生', user: '普通用户' };
+const roleLabel = (role) => ROLE_LABELS[role] ?? role;
+const audienceText = (draft) =>
+  (draft?.audience_roles ?? ['teacher', 'student', 'user']).map(roleLabel).join('、');
+
 async function run(action, { success, onDone } = {}) {
   try {
     await action();
@@ -99,6 +104,7 @@ const ACTION_TEXT = {
   'connection.create': '创建了连接', 'connection.update': '更新了连接', 'connection.delete': '删除了连接',
   'agent.create': '注册了智能体', 'agent.update': '更新了智能体', 'agent.delete': '删除了智能体',
   'orchestration.create': '创建了编排', 'orchestration.delete': '删除了编排',
+  'orchestration.create_from_scenario': '从教育场景创建了编排',
   'orchestration.draft.update': '保存了编排草稿', 'orchestration.draft.restore': '回滚了编排草稿',
   'orchestration.publish': '发布了编排版本', 'orchestration.toggle': '切换了编排状态',
   'user.create': '创建了用户', 'user.update': '更新了用户', 'user.delete': '删除了用户', 'user.bootstrap': '初始化了账户',
@@ -140,6 +146,8 @@ export async function renderOrchestrations(root) {
         <p class="desc">${esc(item.description || template.label + ' 模板')}</p>
         <dl class="meta">
           <dt>模板</dt><dd>${template.icon} ${esc(template.label)}</dd>
+          <dt>受众</dt><dd>${esc(audienceText(item.draft))}</dd>
+          ${item.draft?.scenario_key ? `<dt>场景</dt><dd>${esc(item.draft.scenario_key)}</dd>` : ''}
           <dt>节点</dt><dd>${item.draft?.nodes?.length ?? 0} 个 · 草稿 v${item.draft_version}</dd>
           <dt>更新</dt><dd>${esc(timeAgo(item.updated_at))}</dd>
         </dl>
@@ -189,7 +197,9 @@ function openCreateOrchestration() {
     toast('请先在「智能体」页注册至少一个启用的智能体', 'error');
     return;
   }
-  let selected = 'topic_auction';
+  const chatAgents = store.agents.filter((agent) => agent.enabled && agent.kind === 'coze_chat');
+  let selectedTemplate = 'topic_auction';
+  let selectedScenarioKey = '';
   const form = openModal({
     title: '新建编排方案',
     wide: true,
@@ -200,32 +210,87 @@ function openCreateOrchestration() {
         <label class="field"><span>唯一标识 <span class="hint">小写字母开头，可含数字、_、-</span></span><input name="slug" required placeholder="如：aftersale-triage" /></label>
         <label class="field full"><span>描述（可选）</span><input name="description" maxlength="2000" placeholder="展示在聊天入口的说明文字" /></label>
       </div>
-      <div class="field"><span>协作模板 <span class="hint">决定角色与连线规则，创建后不可更改</span></span>
+      <div class="field"><span>创建方式 <span class="hint">教育场景会自动生成角色、布局、连线与受众范围</span></span>
+        <div class="template-picker">
+          <button type="button" class="template-option selected" data-choice="">
+            <span class="t-icon">⬡</span><span><b>空白编排</b><small>从通用安全模板开始，自行配置节点。</small></span>
+          </button>
+          ${store.educationScenarios.map((scenario) => `
+            <button type="button" class="template-option" data-choice="${esc(scenario.key)}">
+              <span class="t-icon">${scenario.audience_roles.includes('teacher') ? '👩‍🏫' : '🎓'}</span>
+              <span><b>${esc(scenario.name)}</b><small>${esc(scenario.description)}</small></span>
+            </button>`).join('')}
+        </div>
+      </div>
+      <div class="field" data-template-section><span>协作模板 <span class="hint">决定角色与连线规则，创建后不可更改</span></span>
         <div class="template-picker">
           ${Object.entries(TEMPLATES).map(([key, t]) => `
-            <button type="button" class="template-option ${key === selected ? 'selected' : ''}" data-template="${key}">
+            <button type="button" class="template-option ${key === selectedTemplate ? 'selected' : ''}" data-template="${key}">
               <span class="t-icon">${t.icon}</span>
               <span><b>${esc(t.label)}</b><small>${esc(t.description)}</small></span>
             </button>`).join('')}
         </div>
-      </div>`,
+      </div>
+      <div data-scenario-section hidden></div>`,
     onSubmit: async (formEl) => {
       const data = Object.fromEntries(new FormData(formEl));
       if (!SLUG_RE.test(data.slug)) throw Object.assign(new Error(), { userMessage: '标识需以小写字母开头，3-80 位，仅含小写字母、数字、_ 和 -' });
-      const draft = initialDraft(selected, enabledAgent.id);
-      const created = await api('/api/admin/orchestrations', {
-        method: 'POST',
-        body: { slug: data.slug, name: data.name, description: data.description ?? '', draft, enabled: true },
-      });
+      let created;
+      if (selectedScenarioKey) {
+        const scenario = store.educationScenarios.find((item) => item.key === selectedScenarioKey);
+        const agent_mapping = Object.fromEntries(
+          scenario.roles.map((role) => [role.key, data[`agent_${role.key}`]]),
+        );
+        created = await api('/api/admin/orchestrations/from-scenario', {
+          method: 'POST',
+          body: {
+            scenario_key: scenario.key, slug: data.slug, name: data.name,
+            description: data.description || null, agent_mapping, enabled: true,
+          },
+        });
+      } else {
+        const draft = initialDraft(selectedTemplate, enabledAgent.id);
+        created = await api('/api/admin/orchestrations', {
+          method: 'POST',
+          body: { slug: data.slug, name: data.name, description: data.description ?? '', draft, enabled: true },
+        });
+      }
       closeModal();
       await loadAll();
-      toast('编排已创建', 'success');
+      toast(selectedScenarioKey ? '教育场景编排已创建' : '编排已创建', 'success');
       location.hash = `#/orchestrations/${created.id}`;
     },
   });
+
+  const renderScenario = () => {
+    const section = form.querySelector('[data-scenario-section]');
+    const templateSection = form.querySelector('[data-template-section]');
+    const scenario = store.educationScenarios.find((item) => item.key === selectedScenarioKey);
+    templateSection.hidden = Boolean(scenario);
+    section.hidden = !scenario;
+    if (!scenario) { section.innerHTML = ''; return; }
+    section.innerHTML = `<div class="field">
+      <span>${esc(scenario.name)} <span class="hint">${esc(roleLabel(scenario.audience_roles[0]))}专属 · ${esc(TEMPLATES[scenario.template]?.label ?? scenario.template)}</span></span>
+      <p class="palette-note">${esc(scenario.description)} 所有角色必须使用 Coze Chat；可以让一个智能体临时承担多个角色。</p>
+      <div class="fields">
+        ${scenario.roles.map((role, index) => `<label class="field"><span>${esc(role.display_name)} <span class="hint">${esc(role.description)}</span></span>
+          <select name="agent_${esc(role.key)}" required>
+            ${chatAgents.map((agent, agentIndex) => `<option value="${agent.id}" ${agentIndex === index % Math.max(chatAgents.length, 1) ? 'selected' : ''}>${esc(agent.display_name)} · ${esc(agent.slug)}</option>`).join('')}
+          </select></label>`).join('')}
+      </div>
+      ${chatAgents.length ? '' : '<span class="hint" style="color:var(--danger)">没有启用的 Coze Chat 智能体，无法创建此场景。</span>'}
+    </div>`;
+  };
+
+  form.querySelectorAll('[data-choice]').forEach((option) =>
+    option.addEventListener('click', () => {
+      selectedScenarioKey = option.dataset.choice;
+      form.querySelectorAll('[data-choice]').forEach((el) => el.classList.toggle('selected', el === option));
+      renderScenario();
+    }));
   form.querySelectorAll('[data-template]').forEach((option) =>
     option.addEventListener('click', () => {
-      selected = option.dataset.template;
+      selectedTemplate = option.dataset.template;
       form.querySelectorAll('[data-template]').forEach((el) => el.classList.toggle('selected', el === option));
     }));
 }
@@ -486,7 +551,7 @@ export async function renderUsers(root) {
       <thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th><th style="width:90px"></th></tr></thead>
       <tbody>${store.users.map((item) => `<tr data-id="${item.id}">
         <td><b style="font-weight:600">${esc(item.username)}</b>${item.username === store.user.username ? ' <span class="badge" style="height:19px">当前账户</span>' : ''}</td>
-        <td>${item.role === 'admin' ? '<span class="badge accent">管理员</span>' : '<span class="badge">普通用户</span>'}</td>
+        <td><span class="badge ${item.role === 'admin' ? 'accent' : ''}">${esc(roleLabel(item.role))}</span></td>
         <td>${switchHtml(item.active, `data-toggle ${item.username === store.user.username ? 'disabled' : ''}`)}</td>
         <td style="color:var(--text-2)">${esc(formatDate(item.created_at))}</td>
         <td><div class="row-actions">
@@ -528,7 +593,9 @@ function openUserModal(item, onDone) {
         <input name="password" type="password" autocomplete="new-password" ${item ? '' : 'required'} minlength="12" maxlength="256" placeholder="至少 12 位" /></label>
       <label class="field"><span>角色</span>
         <select name="role">
-          <option value="user" ${item?.role !== 'admin' ? 'selected' : ''}>普通用户（仅聊天）</option>
+          <option value="student" ${item?.role === 'student' ? 'selected' : ''}>学生（学生场景 + 公共编排）</option>
+          <option value="teacher" ${item?.role === 'teacher' ? 'selected' : ''}>教师（教师场景 + 公共编排）</option>
+          <option value="user" ${!item || item?.role === 'user' ? 'selected' : ''}>普通用户（仅公共编排）</option>
           <option value="admin" ${item?.role === 'admin' ? 'selected' : ''}>管理员（聊天 + 控制台）</option>
         </select></label>`,
     onSubmit: async (formEl) => {

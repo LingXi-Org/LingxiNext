@@ -3,9 +3,16 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from lingxigraph import HumanMessage, SystemMessage
 from lingxigraph.integrations import AsyncCozeClient
 
-from app.graph_templates import AgentSpec, GraphCompiler, parse_control, validate_draft
+from app.graph_templates import (
+    AgentSpec,
+    GraphCompiler,
+    _with_instructions,
+    parse_control,
+    validate_draft,
+)
 from app.schemas import DraftEdge, DraftNode, OrchestrationDraft
 
 
@@ -166,6 +173,14 @@ def test_control_json_has_safe_fallback_parser() -> None:
         "next_agent": "__end__"
     }
     assert parse_control("not json") is None
+
+
+def test_platform_instructions_are_injected_before_conversation_messages() -> None:
+    original = HumanMessage("请解释勾股定理")
+    state = _with_instructions({"messages": [original]}, "只输出安全路由 JSON")
+    assert isinstance(state["messages"][0], SystemMessage)
+    assert state["messages"][0].content == "只输出安全路由 JSON"
+    assert state["messages"][1] is original
 
 
 @pytest.mark.asyncio

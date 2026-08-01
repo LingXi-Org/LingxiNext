@@ -17,6 +17,7 @@ from lingxigraph import (
     Runtime,
     Send,
     StateGraph,
+    SystemMessage,
     add_messages,
 )
 from lingxigraph.integrations import AsyncCozeClient, CozeAgentNode, CozeWorkflowNode
@@ -53,6 +54,15 @@ class GraphState(TypedDict, total=False):
 
 class GraphContext(TypedDict, total=False):
     username: str
+
+
+def _with_instructions(state: GraphState, instructions: str | None) -> GraphState:
+    if not instructions:
+        return state
+    return {
+        **state,
+        "messages": [SystemMessage(instructions), *state.get("messages", [])],
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,7 +514,13 @@ class GraphCompiler:
         return self._plan_execute(draft, nodes, client_for)
 
     @staticmethod
-    def _chat_node(spec: AgentSpec, client: AsyncCozeClient, *, stream: bool = True):
+    def _chat_node(
+        spec: AgentSpec,
+        client: AsyncCozeClient,
+        *,
+        stream: bool = True,
+        instructions: str | None = None,
+    ):
         async def call(state: GraphState, runtime: Runtime[GraphContext]):
             node = CozeAgentNode(
                 spec.remote_id,
@@ -513,7 +529,7 @@ class GraphCompiler:
                 stream=stream,
                 suggestions_key="coze_suggestions",
             )
-            return await node(state, runtime)
+            return await node(_with_instructions(state, instructions), runtime)
 
         return call
 
@@ -536,17 +552,22 @@ class GraphCompiler:
 
         return call
 
-    def _agent_node(self, spec, client, *, stream=True):
+    def _agent_node(self, spec, client, *, stream=True, instructions=None):
         return (
             self._workflow_node(spec, client)
             if spec.kind == "coze_workflow"
-            else self._chat_node(spec, client, stream=stream)
+            else self._chat_node(spec, client, stream=stream, instructions=instructions)
         )
 
     def _topic_auction(self, draft, nodes, client_for):
         graph = StateGraph(GraphState, context_schema=GraphContext, name="topic-auction")
-        for node_id, (_node, spec) in nodes.items():
-            graph.add_node(node_id, self._agent_node(spec, client_for(spec)))
+        for node_id, (node, spec) in nodes.items():
+            graph.add_node(
+                node_id,
+                self._agent_node(
+                    spec, client_for(spec), instructions=str(node.config.get("instructions", ""))
+                ),
+            )
             graph.add_edge(node_id, END)
 
         def route(state: GraphState):
@@ -599,7 +620,15 @@ class GraphCompiler:
         )
         specialists = [node_id for node_id, (node, _) in nodes.items() if node.role == "specialist"]
         node, spec = nodes[supervisor_id]
-        graph.add_node(supervisor_id, self._agent_node(spec, client_for(spec), stream=False))
+        graph.add_node(
+            supervisor_id,
+            self._agent_node(
+                spec,
+                client_for(spec),
+                stream=False,
+                instructions=str(node.config.get("instructions", "")),
+            ),
+        )
         max_turns = int(draft.settings.get("max_turns", 8))
 
         def decide(state: GraphState):
@@ -616,9 +645,14 @@ class GraphCompiler:
         graph.add_node("supervisor_decision", decide, destinations=(*specialists, END))
         graph.add_edge(START, supervisor_id).add_edge(supervisor_id, "supervisor_decision")
         for specialist in specialists:
-            _, specialist_spec = nodes[specialist]
+            specialist_node, specialist_spec = nodes[specialist]
             graph.add_node(
-                specialist, self._agent_node(specialist_spec, client_for(specialist_spec))
+                specialist,
+                self._agent_node(
+                    specialist_spec,
+                    client_for(specialist_spec),
+                    instructions=str(specialist_node.config.get("instructions", "")),
+                ),
             )
             graph.add_edge(specialist, supervisor_id)
         return graph
@@ -630,8 +664,13 @@ class GraphCompiler:
             allowed.setdefault(edge.source, set()).add(edge.target)
         max_turns = int(draft.settings.get("max_turns", 8))
 
-        for node_id, (_node, spec) in nodes.items():
-            graph.add_node(node_id, self._agent_node(spec, client_for(spec)))
+        for node_id, (node, spec) in nodes.items():
+            graph.add_node(
+                node_id,
+                self._agent_node(
+                    spec, client_for(spec), instructions=str(node.config.get("instructions", ""))
+                ),
+            )
 
             def make_decider(current: str):
                 def decide(state: GraphState):
@@ -658,8 +697,13 @@ class GraphCompiler:
         judge = next(node_id for node_id, (node, _) in nodes.items() if node.role == "judge")
 
         async def source_node(state, runtime):
-            _, spec = nodes[source]
-            result = await self._chat_node(spec, client_for(spec), stream=False)(state, runtime)
+            node, spec = nodes[source]
+            result = await self._chat_node(
+                spec,
+                client_for(spec),
+                stream=False,
+                instructions=str(node.config.get("instructions", "")),
+            )(state, runtime)
             message = result["messages"][-1]
             return {**result, "artifact": str(message.content)}
 
@@ -668,17 +712,20 @@ class GraphCompiler:
         for reviewer in reviewers:
 
             async def review_node(state, runtime, reviewer_id=reviewer):
-                _, spec = nodes[reviewer_id]
+                node, spec = nodes[reviewer_id]
                 prompt = HumanMessage(f"Review this artifact:\n{state.get('artifact', '')}")
-                result = await self._chat_node(spec, client_for(spec), stream=False)(
-                    {**state, "messages": [prompt]}, runtime
-                )
+                result = await self._chat_node(
+                    spec,
+                    client_for(spec),
+                    stream=False,
+                    instructions=str(node.config.get("instructions", "")),
+                )({**state, "messages": [prompt]}, runtime)
                 return {"reviews": {reviewer_id: str(result["messages"][-1].content)}}
 
             graph.add_node(reviewer, review_node)
 
         async def judge_node(state, runtime):
-            _, spec = nodes[judge]
+            node, spec = nodes[judge]
             prompt = HumanMessage(
                 "Produce the final answer from the artifact and reviews:\n"
                 + json.dumps(
@@ -686,9 +733,11 @@ class GraphCompiler:
                     ensure_ascii=False,
                 )
             )
-            return await self._chat_node(spec, client_for(spec))(
-                {**state, "messages": [prompt]}, runtime
-            )
+            return await self._chat_node(
+                spec,
+                client_for(spec),
+                instructions=str(node.config.get("instructions", "")),
+            )({**state, "messages": [prompt]}, runtime)
 
         graph.add_node(judge, judge_node)
         graph.add_conditional_edges(
@@ -707,20 +756,28 @@ class GraphCompiler:
         max_turns = int(draft.settings.get("max_turns", 4))
 
         async def planner_node(state, runtime):
-            _, spec = nodes[planner]
-            result = await self._chat_node(spec, client_for(spec), stream=False)(state, runtime)
+            node, spec = nodes[planner]
+            result = await self._chat_node(
+                spec,
+                client_for(spec),
+                stream=False,
+                instructions=str(node.config.get("instructions", "")),
+            )(state, runtime)
             return {**result, "plan": str(result["messages"][-1].content), "turn": 0}
 
         async def executor_node(state, runtime):
-            _, spec = nodes[executor]
+            node, spec = nodes[executor]
             prompt = HumanMessage(f"Execute this plan:\n{state.get('plan', '')}")
-            result = await self._agent_node(spec, client_for(spec), stream=False)(
-                {**state, "messages": [prompt]}, runtime
-            )
+            result = await self._agent_node(
+                spec,
+                client_for(spec),
+                stream=False,
+                instructions=str(node.config.get("instructions", "")),
+            )({**state, "messages": [prompt]}, runtime)
             return {**result, "execution": str(result["messages"][-1].content)}
 
         async def replanner_node(state, runtime):
-            _, spec = nodes[replanner]
+            node, spec = nodes[replanner]
             prompt = HumanMessage(
                 "Return JSON with done, response and optional next_plan:\n"
                 + json.dumps(
@@ -728,9 +785,12 @@ class GraphCompiler:
                     ensure_ascii=False,
                 )
             )
-            return await self._chat_node(spec, client_for(spec), stream=False)(
-                {**state, "messages": [prompt]}, runtime
-            )
+            return await self._chat_node(
+                spec,
+                client_for(spec),
+                stream=False,
+                instructions=str(node.config.get("instructions", "")),
+            )({**state, "messages": [prompt]}, runtime)
 
         def route(state):
             turn = int(state.get("turn", 0)) + 1
