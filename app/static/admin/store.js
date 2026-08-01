@@ -8,19 +8,22 @@ export const store = {
   connections: [],
   agents: [],
   orchestrations: [],
+  educationScenarios: [],
   users: [],
   ready: false,
 };
 
 export async function loadAll() {
-  const [meta, connections, agents, orchestrations, users] = await Promise.all([
+  const [meta, scenarios, connections, agents, orchestrations, users] = await Promise.all([
     store.ready ? null : api('/api/admin/meta'),
+    store.ready ? null : api('/api/admin/education/scenarios'),
     api('/api/admin/connections'),
     api('/api/admin/agents'),
     api('/api/admin/orchestrations'),
     api('/api/admin/users'),
   ]);
   if (meta) applyServerMeta(meta);
+  if (scenarios) store.educationScenarios = scenarios.items;
   store.connections = connections.items;
   store.agents = agents.items;
   store.orchestrations = orchestrations.items;

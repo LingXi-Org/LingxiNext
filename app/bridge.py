@@ -26,7 +26,9 @@ def _trace_preview(value: Any, limit: int = 2000) -> str:
     if value is None:
         return ""
     try:
-        rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        rendered = (
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        )
     except (TypeError, ValueError):
         rendered = str(value)
     return rendered[:limit]

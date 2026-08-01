@@ -20,6 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .bridge import graph_manager
 from .db import engine, ping_database, session_scope
+from .education_scenarios import (
+    build_scenario_draft,
+    get_education_scenario,
+    list_education_scenarios,
+)
 from .graph_templates import (
     EDGE_RULES,
     ROLE_RULES,
@@ -49,6 +54,7 @@ from .schemas import (
     DraftUpdate,
     OrchestrationCreate,
     OrchestrationDraft,
+    OrchestrationFromScenario,
     UserInput,
     UserUpdate,
 )
@@ -122,9 +128,7 @@ _STARTED_AT = datetime.now(timezone.utc)
 
 
 @router.get("/api/admin/system")
-async def system_status(
-    _user=Depends(admin_guard), session: AsyncSession = Depends(session_scope)
-):
+async def system_status(_user=Depends(admin_guard), session: AsyncSession = Depends(session_scope)):
     with _PROCESS.oneshot():
         memory = _PROCESS.memory_info()
         process_cpu = _PROCESS.cpu_percent(interval=None)
@@ -213,6 +217,11 @@ async def orchestration_meta(_user=Depends(admin_guard)):
             for template, rules in ROLE_RULES.items()
         }
     }
+
+
+@router.get("/api/admin/education/scenarios")
+async def education_scenarios(_user=Depends(admin_guard)):
+    return {"items": [scenario.payload() for scenario in list_education_scenarios()]}
 
 
 @router.get("/api/admin/connections")
@@ -403,6 +412,64 @@ async def create_orchestration(
     session.add(item)
     await session.flush()
     await audit(session, user.username, "orchestration.create", "orchestration", str(item.id))
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        raise HTTPException(409, detail="orchestration_slug_exists") from exc
+    return orchestration_payload(item)
+
+
+@router.post("/api/admin/orchestrations/from-scenario", status_code=201)
+async def create_orchestration_from_scenario(
+    body: OrchestrationFromScenario,
+    user=Depends(write_guard),
+    session: AsyncSession = Depends(session_scope),
+):
+    scenario = get_education_scenario(body.scenario_key)
+    if scenario is None:
+        raise HTTPException(404, detail="education_scenario_not_found")
+    try:
+        draft = build_scenario_draft(scenario, body.agent_mapping)
+    except ValueError as exc:
+        raise HTTPException(
+            422, detail={"code": "invalid_agent_mapping", "message": str(exc)}
+        ) from exc
+
+    requested = set(body.agent_mapping.values())
+    agents = (
+        (await session.scalars(select(AgentDefinition).where(AgentDefinition.id.in_(requested))))
+        .unique()
+        .all()
+    )
+    found = {agent.id for agent in agents}
+    if found != requested:
+        raise HTTPException(422, detail="agent_not_found")
+    if any(agent.kind != "coze_chat" for agent in agents):
+        raise HTTPException(422, detail="education_scenario_requires_coze_chat")
+
+    compiler = GraphCompiler()
+    specs = await compiler.load_agent_specs(session, draft)
+    validation = validate_draft(draft, specs)
+    if not validation.valid:
+        raise HTTPException(422, detail=validation.model_dump())
+
+    item = Orchestration(
+        slug=body.slug,
+        name=body.name,
+        description=body.description if body.description is not None else scenario.description,
+        draft=draft.model_dump(mode="json"),
+        enabled=body.enabled,
+    )
+    session.add(item)
+    await session.flush()
+    await audit(
+        session,
+        user.username,
+        "orchestration.create_from_scenario",
+        "orchestration",
+        str(item.id),
+        {"scenario_key": scenario.key},
+    )
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -770,14 +837,18 @@ async def session_detail(
     session: AsyncSession = Depends(session_scope),
 ):
     thread = (
-        await session.execute(
-            text(
-                'SELECT t.id, t."createdAt" AS created_at, t.name, '
-                't."userIdentifier" AS user_identifier FROM threads t WHERE t.id = :tid'
-            ),
-            {"tid": thread_id},
+        (
+            await session.execute(
+                text(
+                    'SELECT t.id, t."createdAt" AS created_at, t.name, '
+                    't."userIdentifier" AS user_identifier FROM threads t WHERE t.id = :tid'
+                ),
+                {"tid": thread_id},
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
     if thread is None:
         raise HTTPException(404, detail="session_not_found")
     binding = await session.get(ThreadBinding, thread_id)

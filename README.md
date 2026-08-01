@@ -16,6 +16,7 @@ revision、PostgreSQL checkpoint 和受约束图模板支撑可恢复的多智�
 - **安全 Coze 集成**：支持 Coze Chat 与 Workflow，Service Token 加密存储、掩码返回且不会进入图状态。
 - **轻量管理后台**：Jinja2、原生 JavaScript 与 SVG 节点画布，无 Node 构建链。
 - **生产化部署**：应用以非 root、只读根文件系统运行，Compose 提供迁移门禁、健康检查和优雅终止。
+- **教育角色与场景**：支持教师、学生和普通用户的 revision 级访问控制，并提供学生学习伙伴与教师教学方案审核预设。
 
 ## 架构
 
@@ -81,6 +82,17 @@ docker compose ps
 首次启动会幂等创建 `.env` 中配置的管理员。登录后依次创建 Coze 连接、Agent 和编排方案，
 校验并发布 revision；已启用的方案会自动成为 Chainlit Chat Profile。
 
+## 教师与学生场景快速演示
+
+管理后台可从两个教育场景直接创建安全编排：
+
+- `student_learning_companion`：基于 Supervisor，由学习协调者调度概念导师、苏格拉底教练、练习生成器和反思总结助手；
+- `teacher_lesson_review`：基于 Parallel Review，由方案生成器起草，教学法、难度和评价设计三个 reviewer 并行审核，最后综合定稿。
+
+先注册所需的 Coze Chat Agent，然后进入“智能体编排 → 新建编排”，选择教育场景并映射角色。校验并发布后，在“平台用户”中创建 `student` 或 `teacher` 账号：学生只会看到学生场景和公共编排，教师只会看到教师场景和公共编排，管理员可访问全部编排。服务端会在新会话绑定 revision 前再次授权，手工伪造 Chat Profile 不能跨角色访问。
+
+详细架构、控制协议、API 和演示步骤见 [教育场景文档](docs/education-scenarios.md)。
+
 ## 本地开发
 
 项目使用 [uv](https://docs.astral.sh/uv/) 管理依赖与锁文件。
@@ -119,9 +131,11 @@ python scripts/sync_upstreams.py --apply
 
 ```text
 app/
+  access_policy.py      教育角色与 revision 受众访问策略
   admin.py             管理页面、管理 API 与健康检查
   bridge.py            Chainlit 事件与 LingxiGraph 运行桥接
   chat.py              Chainlit 认证、数据层与 Chat Profile
+  education_scenarios.py 教师与学生场景预设及草稿生成器
   graph_templates.py   安全模板校验与编译器
   migrations.py        平台、Chainlit 与 checkpoint 初始化
   models.py            PostgreSQL 数据模型

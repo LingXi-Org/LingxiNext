@@ -8,6 +8,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SlugPattern = re.compile(r"^[a-z][a-z0-9_-]{2,79}$")
+PlatformRole = Literal["admin", "teacher", "student", "user"]
+AudienceRole = Literal["teacher", "student", "user"]
+TemplateName = Literal["topic_auction", "supervisor", "handoff", "parallel_review", "plan_execute"]
+
+
+def default_audience_roles() -> list[AudienceRole]:
+    return ["teacher", "student", "user"]
 
 
 class StrictModel(BaseModel):
@@ -69,7 +76,9 @@ class DraftEdge(StrictModel):
 
 
 class OrchestrationDraft(StrictModel):
-    template: Literal["topic_auction", "supervisor", "handoff", "parallel_review", "plan_execute"]
+    template: TemplateName
+    scenario_key: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{2,79}$")
+    audience_roles: list[AudienceRole] = Field(default_factory=default_audience_roles, min_length=1)
     nodes: list[DraftNode] = Field(default_factory=list, max_length=32)
     edges: list[DraftEdge] = Field(default_factory=list, max_length=128)
     settings: dict[str, Any] = Field(default_factory=dict)
@@ -99,15 +108,31 @@ class DraftUpdate(StrictModel):
 class UserInput(StrictModel):
     username: str = Field(min_length=3, max_length=128, pattern=r"^[A-Za-z0-9_.@-]+$")
     password: str = Field(min_length=12, max_length=256)
-    role: Literal["admin", "user"] = "user"
+    role: PlatformRole = "user"
     active: bool = True
 
 
 class UserUpdate(StrictModel):
     username: str = Field(min_length=3, max_length=128, pattern=r"^[A-Za-z0-9_.@-]+$")
     password: str | None = Field(default=None, min_length=12, max_length=256)
-    role: Literal["admin", "user"] = "user"
+    role: PlatformRole = "user"
     active: bool = True
+
+
+class OrchestrationFromScenario(StrictModel):
+    scenario_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,79}$")
+    slug: str
+    name: str = Field(min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=2000)
+    agent_mapping: dict[str, uuid.UUID] = Field(min_length=1, max_length=32)
+    enabled: bool = True
+
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, value: str) -> str:
+        if not SlugPattern.fullmatch(value):
+            raise ValueError("slug must match ^[a-z][a-z0-9_-]{2,79}$")
+        return value
 
 
 class ValidationIssue(BaseModel):

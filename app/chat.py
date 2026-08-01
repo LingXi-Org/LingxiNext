@@ -8,10 +8,11 @@ import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from sqlalchemy import select
 
+from app.access_policy import can_access_revision
 from app.bridge import bridge
 from app.config import get_settings
 from app.db import SessionFactory
-from app.models import Orchestration, PlatformUser, ThreadBinding
+from app.models import Orchestration, OrchestrationRevision, PlatformUser, ThreadBinding
 from app.repository import get_binding
 from app.security import verify_password
 
@@ -38,68 +39,100 @@ async def authenticate(username: str, password: str) -> cl.User | None:
 
 @cl.set_chat_profiles
 async def chat_profiles(user: cl.User | None):
-    del user
+    role = _user_role(user)
     async with SessionFactory() as session:
-        rows = (
-            await session.scalars(
-                select(Orchestration)
-                .where(
-                    Orchestration.enabled.is_(True),
-                    Orchestration.active_revision_id.is_not(None),
-                )
-                .order_by(Orchestration.name)
-            )
-        ).all()
+        rows = await _published_orchestrations(session)
         return [
-            cl.ChatProfile(name=item.slug, markdown_description=item.description or item.name)
-            for item in rows
+            cl.ChatProfile(
+                name=orchestration.slug,
+                markdown_description=orchestration.description or orchestration.name,
+            )
+            for orchestration, _revision in _accessible_orchestrations(rows, role)
         ]
 
 
-def _session_values() -> tuple[str, str, str | None]:
+def _user_role(user: cl.User | None) -> str:
+    metadata = getattr(user, "metadata", None) or {}
+    return str(metadata.get("role", ""))
+
+
+async def _published_orchestrations(session):
+    return (
+        await session.execute(
+            select(Orchestration, OrchestrationRevision)
+            .join(
+                OrchestrationRevision,
+                OrchestrationRevision.id == Orchestration.active_revision_id,
+            )
+            .where(
+                Orchestration.enabled.is_(True),
+                Orchestration.active_revision_id.is_not(None),
+            )
+            .order_by(Orchestration.name)
+        )
+    ).all()
+
+
+def _accessible_orchestrations(rows, role: str):
+    return [row for row in rows if can_access_revision(role, row[1].config)]
+
+
+def _select_orchestration(rows, role: str, profile: str | None):
+    if not profile:
+        accessible = _accessible_orchestrations(rows, role)
+        return (accessible[0] if accessible else None), False
+    selected = next((row for row in rows if row[0].slug == profile), None)
+    if selected is None:
+        return None, False
+    if not can_access_revision(role, selected[1].config):
+        return None, True
+    return selected, False
+
+
+def _session_values() -> tuple[str, str, str | None, str]:
     chainlit_session = cl.context.session
     user = getattr(chainlit_session, "user", None)
     return (
         str(chainlit_session.thread_id),
         str(getattr(user, "identifier", "anonymous")),
         getattr(chainlit_session, "chat_profile", None),
+        _user_role(user),
     )
 
 
 @cl.on_chat_start
 async def on_chat_start() -> None:
-    thread_id, username, profile = _session_values()
+    thread_id, username, profile, role = _session_values()
     async with SessionFactory() as session:
         if await get_binding(session, thread_id):
             return
-        query = select(Orchestration).where(
-            Orchestration.enabled.is_(True), Orchestration.active_revision_id.is_not(None)
-        )
-        if profile:
-            query = query.where(Orchestration.slug == profile)
-        query = query.order_by(Orchestration.name)
-        orchestration = await session.scalar(query)
-        if orchestration is None or orchestration.active_revision_id is None:
+        rows = await _published_orchestrations(session)
+        selected, forbidden = _select_orchestration(rows, role, profile)
+        if forbidden:
+            await cl.Message(content="你无权访问所选编排方案，请选择与你角色匹配的场景。").send()
+            return
+        if selected is None:
             await cl.Message(
-                content="当前没有已发布的编排方案，请联系管理员在 /admin 中发布。"
+                content="当前没有可访问的已发布编排方案，请联系管理员在 /admin 中发布。"
             ).send()
             return
+        orchestration, revision = selected
         session.add(
             ThreadBinding(
                 thread_id=thread_id,
                 orchestration_id=orchestration.id,
-                revision_id=orchestration.active_revision_id,
+                revision_id=revision.id,
                 username=username,
             )
         )
         await session.commit()
-        cl.user_session.set("orchestration_revision_id", str(orchestration.active_revision_id))
+        cl.user_session.set("orchestration_revision_id", str(revision.id))
         await cl.Message(content=f"已固定到 **{orchestration.name}** 的当前发布版本。").send()
 
 
 @cl.on_chat_resume
 async def on_chat_resume(_thread) -> None:
-    thread_id, _username, _profile = _session_values()
+    thread_id, _username, _profile, _role = _session_values()
     async with SessionFactory() as session:
         binding = await get_binding(session, thread_id)
         if binding:
@@ -124,7 +157,7 @@ async def _read_uploads(message: cl.Message) -> list[tuple[str, bytes, str]]:
 
 @cl.on_message
 async def on_message(message: cl.Message) -> None:
-    thread_id, _username, _profile = _session_values()
+    thread_id, _username, _profile, _role = _session_values()
     async with SessionFactory() as session:
         binding = await get_binding(session, thread_id)
         if binding is None:
@@ -148,7 +181,7 @@ async def on_follow_up(action: cl.Action) -> None:
     await action.remove()
     if not question:
         return
-    thread_id, _username, _profile = _session_values()
+    thread_id, _username, _profile, _role = _session_values()
     async with SessionFactory() as session:
         binding = await get_binding(session, thread_id)
         if binding is None:
@@ -160,7 +193,7 @@ async def on_follow_up(action: cl.Action) -> None:
 
 @cl.on_stop
 async def on_stop() -> None:
-    thread_id, _username, _profile = _session_values()
+    thread_id, _username, _profile, _role = _session_values()
     await bridge.cancel(thread_id)
 
 

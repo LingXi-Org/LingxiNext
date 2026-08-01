@@ -597,12 +597,19 @@ function renderEdgeInspector(host, [source, target]) {
 function renderSettingsInspector(host) {
   const meta = template();
   const settings = ed.draft.settings ?? (ed.draft.settings = {});
+  const audienceRoles = ed.draft.audience_roles ?? ['teacher', 'student', 'user'];
   host.innerHTML = `
     <div class="ed-section">
       <h4>编排信息</h4>
       <div class="fields">
         <label class="field"><span>名称</span><input data-set-name value="${esc(ed.name)}" maxlength="160" /></label>
         <label class="field"><span>描述</span><textarea data-set-desc rows="2" maxlength="2000" placeholder="展示在聊天入口">${esc(ed.description ?? '')}</textarea></label>
+        ${ed.draft.scenario_key ? `<div class="field"><span>教育场景</span><div class="mono" style="padding:8px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface-2)">${esc(ed.draft.scenario_key)}</div></div>` : ''}
+        <div class="field"><span>可访问角色 <span class="hint">发布后随不可变版本生效</span></span>
+          <label><input type="checkbox" data-audience="teacher" ${audienceRoles.includes('teacher') ? 'checked' : ''} /> 教师</label>
+          <label><input type="checkbox" data-audience="student" ${audienceRoles.includes('student') ? 'checked' : ''} /> 学生</label>
+          <label><input type="checkbox" data-audience="user" ${audienceRoles.includes('user') ? 'checked' : ''} /> 普通用户</label>
+        </div>
       </div>
     </div>
     <div class="ed-section">
@@ -645,6 +652,17 @@ function renderSettingsInspector(host) {
     ed.description = event.target.value;
     commit({ skipCanvas: true });
   });
+  host.querySelectorAll('[data-audience]').forEach((input) =>
+    input.addEventListener('change', () => {
+      const selected = [...host.querySelectorAll('[data-audience]:checked')].map((item) => item.dataset.audience);
+      if (!selected.length) {
+        input.checked = true;
+        toast('至少选择一个可访问角色', 'error');
+        return;
+      }
+      ed.draft.audience_roles = selected;
+      commit({ skipCanvas: true });
+    }));
   host.querySelector('[data-set-turns]').addEventListener('change', (event) => {
     const value = Math.max(1, Math.min(40, Number(event.target.value) || 8));
     event.target.value = value;
