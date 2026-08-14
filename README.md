@@ -1,25 +1,82 @@
 # LingxiNext
 
-基于 [LingxiGraph](https://github.com/LingXi-Org/LingxiGraph) 与原生
-[Chainlit](https://github.com/Chainlit/chainlit) 的安全多智能体编排平台。
+<div align="center">
+  <p><strong>Application delivery and operations layer in the LingXi series</strong></p>
+  <p><a href="docs/README.zh-CN.md">简体中文</a></p>
+</div>
 
-LingxiNext 是 [Coze-Chainlit](https://github.com/LingXi-Org/Coze-Chainlit) 编排能力的
-重新设计：使用 LingxiGraph 作为嵌入式运行时，直接加载 Chainlit 的 PyPI 前端，以不可变
-revision、PostgreSQL checkpoint 和受约束图模板支撑可恢复的多智能体会话。
+LingxiNext combines the Chainlit interface, an administrative console, revisioned orchestration, and PostgreSQL persistence around an embedded LingxiGraph runtime. It provides a deployable application surface for configuring, validating, releasing, and running controlled multi-agent conversations.
 
-## 核心能力
+The project focuses on the boundary between a graph runtime and application delivery: configuration, validation, release management, session binding, persistence, and operational visibility.
 
-- **原生 Chainlit**：聊天界面挂载在 `/`，不复制 Chainlit 源码，也不维护独立 React/Vite 前端。
-- **嵌入式 LingxiGraph**：FastAPI、Chainlit、管理后台与图运行时处于同一进程，无需 Redis 或独立 Worker。
-- **版本化编排**：草稿发布为不可变 revision；每个会话固定 revision，新发布不会改变历史会话行为。
-- **可靠恢复**：Chainlit thread ID 映射到 graph `thread_id`，revision ID 作为 checkpoint namespace。
-- **安全 Coze 集成**：支持 Coze Chat 与 Workflow，Service Token 加密存储、掩码返回且不会进入图状态。
-- **轻量管理后台**：Jinja2、原生 JavaScript 与 SVG 节点画布，无 Node 构建链。
-- **生产化部署**：应用以非 root、只读根文件系统运行，Compose 提供迁移门禁、健康检查和优雅终止。
+## Position in the LingXi series
 
-## 架构
+LingxiNext sits above LingxiGraph and turns graph execution capabilities into an application that can be configured and operated as a complete deployment.
 
-```mermaid
+~~~mermaid
+flowchart TB
+    Operator["Operator"] --> Console["LingxiNext admin console"]
+    Console --> Release["Validation and revision release"]
+    Runtime["LingxiNext application"] --> Bridge["Chainlit–LingxiGraph bridge"]
+    Bridge --> Graph["Embedded LingxiGraph runtime"]
+    Release --> Graph
+    Graph --> Coze["Coze Bot / Coze Workflow"]
+    Console --> PostgreSQL[("PostgreSQL")]
+    Graph --> PostgreSQL
+~~~
+
+| Layer | Responsibility |
+| --- | --- |
+| **LingxiGraph** | Stateful graph execution, checkpoints, recovery, streaming events, and Agent/Workflow nodes. |
+| **LingxiNext** | Application entry point, administrative configuration, orchestration release, thread binding, audit, and deployment baseline. |
+| **Coze** | First-class external Agent and Workflow integration in the current release. |
+
+LingxiNext is not a replacement for LingxiGraph. It is the application layer that provides the controls and persistence required to put selected graph definitions into operation.
+
+## Application model
+
+The application follows a configuration–validation–release–execution model:
+
+1. An administrator creates Coze connections and Agent definitions in <code>/admin</code>.
+2. An orchestration is assembled from a bounded graph template with explicit roles, edges, and execution limits.
+3. The server validates the graph structure and generates an immutable revision.
+4. An enabled orchestration appears as a Chainlit Chat Profile at <code>/</code>.
+5. Each new thread is bound to the revision active at creation time.
+6. Administrative views expose revision information, sessions, runtime state, and audit records.
+
+A later release does not change the revision bound to an existing thread. Historical revisions can be restored into a draft for further validation and release.
+
+## Capabilities
+
+| Capability | Description |
+| --- | --- |
+| Chainlit integration | Uses the stock Chainlit interface for authentication, Chat Profiles, streaming messages, thread persistence, and follow-up actions. |
+| Embedded LingxiGraph | Runs FastAPI, Chainlit, the administrative console, and the graph runtime in one application process. |
+| Revisioned orchestration | Publishes immutable revisions and keeps thread execution pinned to a specific revision. |
+| PostgreSQL persistence | Stores application data, Chainlit data, thread bindings, checkpoints, and audit records. |
+| Coze integration | Supports Coze Bot and Coze Workflow nodes, including protected Service Token handling. |
+| Administrative console | Manages connections, Agents, orchestrations, users, sessions, revisions, and audit records. |
+| Operational baseline | Includes migrations, liveness/readiness probes, graceful termination, and a Compose deployment. |
+
+## Safe orchestration templates
+
+| Template | Description |
+| --- | --- |
+| <code>topic_auction</code> | Routes by keyword, topic, difficulty, and continuity. |
+| <code>supervisor</code> | Uses a Supervisor to coordinate specialist nodes. |
+| <code>handoff</code> | Transfers work along administrator-approved peer edges. |
+| <code>parallel_review</code> | Distributes work to reviewers and aggregates it through a judge. |
+| <code>plan_execute</code> | Constrains a planner–executor–replanner loop. |
+
+The server validates node roles, Agent types, allowed edges, required topology, reachability, cycles, and execution limits. Graph definitions cannot be created by uploading Python or arbitrary callables through the administrative interface.
+
+## Runtime and persistence
+
+FastAPI registers <code>/admin</code>, <code>/api/admin/*</code>, and <code>/health/*</code> before mounting the official Chainlit application with <code>mount_chainlit(..., path="/")</code>. This keeps host routes ahead of Chainlit's SPA catch-all.
+
+The Chainlit thread ID maps to the graph <code>thread_id</code>. The revision ID is used as the checkpoint namespace, so graph state and application conversations remain associated with the same released definition.
+
+~~~mermaid
 flowchart LR
     Browser["Browser"] --> Host["FastAPI host"]
     Host --> Admin["Admin UI and API"]
@@ -30,123 +87,121 @@ flowchart LR
     Admin --> PostgreSQL[("PostgreSQL")]
     Chainlit --> PostgreSQL
     Runtime --> PostgreSQL
-```
+~~~
 
-FastAPI 先注册 `/admin`、`/api/admin/*` 与 `/health/*`，最后通过 Chainlit 官方
-`mount_chainlit(..., path="/")` 挂载聊天应用，避免 SPA catch-all 覆盖宿主路由。
+## Security and operational baseline
 
-## 安全图模板
+- **Authentication and access**: Chainlit password authentication; administrative write APIs require an administrator session and CSRF token.
+- **Credential protection**: Coze Service Tokens are encrypted with a deployment-level master key and returned as masked values.
+- **Auditability**: Key administrative actions and session views are written to audit records.
+- **Container posture**: The application runs as a non-root user with a read-only root filesystem, <code>no-new-privileges</code>, and restricted <code>tmpfs</code> paths.
+- **Startup and shutdown**: Compose starts migrations before the application, checks PostgreSQL readiness, and allows graceful termination.
+- **Data handling**: <code>.env</code> files, real Service Tokens, and production database backups must not be committed.
 
-| 模板 | 用途 | 主要约束 |
-| --- | --- | --- |
-| `topic_auction` | 根据关键词、topic、难度和连续性竞价路由 | 支持独占关键词；Workflow 只能作为终端 Agent |
-| `supervisor` | Supervisor 调度多个 specialist | 校验 `next_agent`，限制轮次并提供确定性回退 |
-| `handoff` | Agent 沿管理员允许的 peer 边转交 | 校验入口与目标，拒绝循环并限制最大跳数 |
-| `parallel_review` | source 并行分发给 reviewer，再由 judge 汇总 | 强制 source → reviewer → judge 拓扑 |
-| `plan_execute` | planner、executor、replanner 循环 | 限制迭代；Workflow 仅允许绑定 executor |
+These controls describe the baseline included in this repository. Single sign-on, network policy, backups, monitoring, retention, incident response, and compliance controls remain deployment concerns.
 
-服务端会重新校验节点角色、Agent 类型、允许边、必需拓扑、循环、入口可达性和运行上限。
-管理员不能上传 Python、任意 callable 或绕过模板创建自由图。
+<details>
+<summary>Current scope</summary>
 
-## Docker Compose 快速开始
+- The current MVP is single-tenant and has no public sign-up; platform users are managed by administrators.
+- Coze Bot and Coze Workflow are the supported external Agent capabilities in this release.
+- This release is not a general-purpose multi-tenant control plane. Tenant isolation, billing, public sign-up, and related capabilities require additional product work.
 
-要求 Docker Engine 与 Docker Compose v2。
+</details>
 
-```bash
+## Quick start
+
+### Docker Compose
+
+Requires Docker Engine and Docker Compose v2.
+
+~~~bash
 git clone --recurse-submodules https://github.com/LingXi-Org/LingxiNext.git
 cd LingxiNext
 cp .env.example .env
-```
+~~~
 
-编辑 `.env`，替换其中的全部占位值。至少需要三个互相独立的强随机密钥：
+Replace every placeholder in <code>.env</code> with an independent strong random value, including at least:
 
-- `CHAINLIT_AUTH_SECRET`
-- `LINGXI_MASTER_KEY`
-- `POSTGRES_PASSWORD`
+- <code>CHAINLIT_AUTH_SECRET</code>
+- <code>LINGXI_MASTER_KEY</code>
+- <code>POSTGRES_PASSWORD</code>
 
-然后启动：
-
-```bash
+~~~bash
 docker compose up --build -d
 docker compose ps
-```
+~~~
 
-默认入口：
+Default endpoints:
 
-- Chainlit：<http://localhost:8123>
-- 管理后台：<http://localhost:8123/admin>
-- Liveness：<http://localhost:8123/health/live>
-- Readiness：<http://localhost:8123/health/ready>
+- Chainlit: <http://localhost:8123>
+- Administration: <http://localhost:8123/admin>
+- Liveness: <http://localhost:8123/health/live>
+- Readiness: <http://localhost:8123/health/ready>
 
-首次启动会幂等创建 `.env` 中配置的管理员。登录后依次创建 Coze 连接、Agent 和编排方案，
-校验并发布 revision；已启用的方案会自动成为 Chainlit Chat Profile。
+The first startup idempotently creates the administrator configured in <code>.env</code>. After signing in, create a Coze connection, Agents, and an orchestration; validate and publish a revision. Enabled orchestrations appear as Chainlit Chat Profiles.
 
-## 本地开发
+### Local development
 
-项目使用 [uv](https://docs.astral.sh/uv/) 管理依赖与锁文件。
+The project uses [uv](https://docs.astral.sh/uv/) for dependency and lock-file management.
 
-```bash
+~~~bash
 git submodule update --init --recursive
 uv sync --extra dev
 uv run python -m app.migrations
 uv run uvicorn app.main:app --reload
-```
+~~~
 
-质量检查：
+Quality checks:
 
-```bash
+~~~bash
 uv run ruff check app scripts tests
 uv run ruff format --check app scripts tests
 uv run mypy app
 uv run pytest -q
 docker build -t lingxinext:local .
-```
+~~~
 
-## 同步上游
+## Project structure
 
-`vendor/LingxiGraph` 是跟踪 `main` 的 Git 子模块，父仓库始终提交确定的子模块 commit。
-Chainlit 则锁定在经过契约测试的最新稳定版本。
+~~~text
+app/
+  admin.py             Admin UI, API, and health checks
+  bridge.py            Chainlit–LingxiGraph runtime bridge
+  chat.py              Chainlit auth, data layer, and Chat Profiles
+  graph_templates.py   Safe template validation and compiler
+  migrations.py        Database initialization
+  models.py            PostgreSQL models
+scripts/
+  sync_upstreams.py    Upstream sync and compatibility checks
+tests/                  Security, template, and API contract tests
+vendor/LingxiGraph/    Pinned upstream Git submodule
+~~~
 
-```bash
+## Upstream synchronization and version governance
+
+<code>vendor/LingxiGraph</code> tracks the upstream <code>main</code> branch as a Git submodule, while the parent repository records an exact submodule commit. Chainlit is pinned to a contract-tested stable version.
+
+~~~bash
 python scripts/sync_upstreams.py --check
 python scripts/sync_upstreams.py --apply
-```
+~~~
 
-`--apply` 会更新 LingxiGraph 子模块指针、解析 Chainlit 最新稳定版本、刷新 `uv.lock`，并运行
-格式、类型、单元、契约与 Docker 构建检查。脚本不会提交、推送或创建 Pull Request。
+<code>--apply</code> updates the LingxiGraph submodule pointer, resolves a stable Chainlit version, refreshes <code>uv.lock</code>, and runs formatting, typing, unit, contract, and Docker build checks. It does not commit, push, or create a pull request.
 
-## 项目结构
+## Documentation and related projects
 
-```text
-app/
-  admin.py             管理页面、管理 API 与健康检查
-  bridge.py            Chainlit 事件与 LingxiGraph 运行桥接
-  chat.py              Chainlit 认证、数据层与 Chat Profile
-  graph_templates.py   安全模板校验与编译器
-  migrations.py        平台、Chainlit 与 checkpoint 初始化
-  models.py            PostgreSQL 数据模型
-scripts/
-  sync_upstreams.py    手动上游同步与兼容性验证
-tests/                 安全、模板和上游 API 契约测试
-vendor/LingxiGraph/    固定 commit 的上游 Git 子模块
-```
+- [LingxiGraph](https://github.com/LingXi-Org/LingxiGraph): the underlying multi-agent graph runtime.
+- [Architecture and execution semantics](vendor/LingxiGraph/docs/architecture.md)
+- [Agents, tools, and multi-agent patterns](vendor/LingxiGraph/docs/agents.md)
+- [Coze integration](vendor/LingxiGraph/docs/integrations-coze.md)
+- [Production operations](vendor/LingxiGraph/docs/operations.md)
+- [Security and tenancy design](vendor/LingxiGraph/docs/security.md)
 
-## 安全边界
+## Contributing and security
 
-- 首版是单租户部署，仅支持 Coze Bot 与 Coze Workflow。
-- 不提供公开注册；平台用户由管理员管理，密码使用 Argon2 哈希。
-- Coze Token 使用部署级主密钥加密，API 仅返回掩码。
-- 管理写接口要求管理员会话和 CSRF Token，所有关键操作写入审计日志。
-- 禁用文件上传、MCP、HTML 注入与公开线程分享。
-- 不包含旧 SQLite 数据迁移，也不迁移练习、作业、错题或排行榜业务。
+Issues, design discussions, documentation improvements, and pull requests are welcome. Before contributing, read the organization-wide [contribution guide](https://github.com/LingXi-Org/.github/blob/main/CONTRIBUTING.md) and review existing issues.
 
-请勿将 `.env`、真实 Service Token 或生产数据库备份提交到仓库。安全问题请遵循组织的
-[安全策略](https://github.com/LingXi-Org/.github/blob/main/SECURITY.md) 私下报告。
+Report security issues privately according to the organization's [security policy](https://github.com/LingXi-Org/.github/blob/main/SECURITY.md). Never commit <code>.env</code> files, real Service Tokens, or production database backups.
 
-## 参与贡献
-
-欢迎提交清晰的问题报告、设计讨论、文档改进与 Pull Request。开始前请阅读组织级
-[贡献指南](https://github.com/LingXi-Org/.github/blob/main/CONTRIBUTING.md) 和本仓库现有 Issue。
-
-LingxiNext 仍在快速演进。更新 LingxiGraph 或 Chainlit 后，请同时提交锁文件、子模块指针和
-兼容性测试结果。
+When updating LingxiGraph or Chainlit, include the lock file, the submodule pointer, and compatibility-test results in the same change.
